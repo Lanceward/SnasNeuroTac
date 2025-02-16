@@ -151,6 +151,8 @@ class NeuroTacDataset(Dataset):
         
         self.data = torch.tensor(data)
         self.labels = torch.tensor(labels)
+        print(self.data.shape)
+        print(self.labels.shape)
 
     def __len__(self):
         return len(self.data)
