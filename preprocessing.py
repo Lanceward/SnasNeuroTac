@@ -24,14 +24,15 @@ def load_and_prepare_data(file_path, threshold = 1, max_timestamp=1000):
     # Pooling
     # crop to (480, 480)
     data = data[:, 80:560]
+    data = data[100:380, 100:380]
     
     h = data.shape[0]
     w = data.shape[1]
     # downsample to (40, 40)
     # reshape to (40, 40, 16)
-    data = data.reshape(40, 12, 40, 12)
+    data = data.reshape(40, 7, 40, 7)
     data = data.swapaxes(1, 2)
-    data = data.reshape(40, 40, 144)
+    data = data.reshape(40, 40, 49)
     
     # Create an empty array with object dtype
     pooled_data = np.empty((40, 40), dtype=object)
@@ -90,12 +91,12 @@ def integrate_events_by_fixed_interval(events, interval, H, W):
     while True:
         left = np.where(t >= current_interval)[0][0]
         
-        right_idxs = np.where(t > current_interval + interval)[0]
+        right_idxs = np.where(t >= current_interval + interval)[0]
         if len(right_idxs) == 0:
             right = N-1
         else:
             right = right_idxs[0]
-            
+        
         frames.append(np.expand_dims(integrate_events_segment_to_frame(x, y, p, H, W, left, right), 0))
 
         current_interval += interval
@@ -106,8 +107,11 @@ def integrate_events_by_fixed_interval(events, interval, H, W):
 def play_single_texture_file(file_path):
     data = load_and_prepare_data(file_path, threshold = 2, max_timestamp=1000)
     events = eventize_data(data)
-    frames = integrate_events_by_fixed_interval(events, 2, 40, 40)
+    frames = integrate_events_by_fixed_interval(events, 1, 40, 40)
     print(frames.shape)
+    print(frames.dtype)
+    print(np.min(frames))
+    print(np.max(frames))
     play_frame(frames, save_gif_to="frames.gif")
 
 def ceiling_division(n, d):
@@ -121,8 +125,8 @@ class NeuroTacDataset(Dataset):
         self.max_timestamp = max_timestamp
         self.data = torch.tensor([])
         self.labels = torch.tensor([])
-        self.Load_data()
-
+        self.Load_data()        
+        
     def Load_data(self):
         # pooling
         H = 40
@@ -130,8 +134,8 @@ class NeuroTacDataset(Dataset):
         threshold = 2
         files = os.listdir(self.data_dir)
         data_length = len(files)
-        data = np.zeros((ceiling_division(self.max_timestamp, self.interval), data_length, 2, H, W))
-        labels = np.zeros(data_length)
+        data = np.zeros((ceiling_division(self.max_timestamp, self.interval), data_length, 2, H, W), dtype=np.uint8)
+        labels = np.zeros(data_length, dtype=int)
         idx = 0
         for datapath in files:
             print("index " + str(idx) + ": " + datapath)
@@ -155,14 +159,17 @@ class NeuroTacDataset(Dataset):
         print(self.labels.shape)
 
     def __len__(self):
-        return len(self.data)
+        return self.data.shape[1]
 
     def __getitem__(self, idx):
         return self.data[:, idx, :, :, :], self.labels[idx]  # Return tuple (input, target)
 
 if __name__ == "__main__":
-    dir_path = "/Users/lanceshi/Desktop/DISS/code/Bristol/SNN/SlideS10"
+    
+    dir_path = "/Users/lance-shi/school/Bristol/SNN/SlideS10"
     labels = ['acrylic', 'canvas', 'cotton', 'fashionfabric', 'felt', 'fur', 'mesh', 'nylon', 'wood', 'wool']
-    nt_dataset = NeuroTacDataset(dir_path, labels)
-    torch.save(nt_dataset, "NeuroTacDataset.pth")
-
+    nt_dataset = NeuroTacDataset(dir_path, labels, interval=1)
+    torch.save(nt_dataset, "NeuroTacDataSetUInt8_cropped.pth")
+    '''
+    play_single_texture_file("/Users/lance-shi/school/Bristol/SNN/SlideS10/taps_trial_0_acrylic_events_on")
+    '''
