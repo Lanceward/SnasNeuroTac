@@ -1,11 +1,13 @@
 import torch
 import torch.nn as nn
 import numpy as np
-#from spikingjelly.clock_driven import functional, surrogate, neuron
 from spikingjelly.activation_based import layer, neuron, surrogate
 import matplotlib.pyplot as plt
 from preprocessing import NeuroTacDataset
 import gc
+from nas_bench_201_search import SNASNet
+import types
+
 
 def logdet(K):
     s, ld = np.linalg.slogdet(K)
@@ -15,9 +17,8 @@ def find_best_neuroncell(trainset):
 
     search_batchsize = 64
     repeat = 2
-    num_search = 500
+    num_search = 100
     timestep = 1000
-    group = 10
     
     #trainig data manipulation
     train_data = torch.utils.data.DataLoader(trainset, batch_size=search_batchsize,
@@ -29,14 +30,32 @@ def find_best_neuroncell(trainset):
 
     with torch.no_grad():
         for i in range(num_search):
-            #generate random hidden_neurons 
-            #hidn = torch.randint(16, 512, (1,))
-            hidn = torch.randint(100, 900, (1,))
-            
-            searchnet = DenseSpikingNN(hidn.item(), timestep)
-            #searchnet = ConvSpikingNN(hidn, timestep)
+            args = types.SimpleNamespace(timestep = timestep, tau = 4/3, threshold = 1.0, second_avgpooling = 2)
+
+            while (1):
+                con_mat =connection_matrix_gen(num_node=4, num_options=5)
+
+                # sanity check on connection matrix
+                neigh2_cnts = torch.mm(con_mat, con_mat)
+                neigh3_cnts = torch.mm(neigh2_cnts, con_mat)
+                neigh4_cnts = torch.mm(neigh3_cnts, con_mat)
+                connection_graph = con_mat + neigh2_cnts + neigh3_cnts + neigh4_cnts
+
+                for node in range(3):
+                    if connection_graph[node,3] ==0: # if any node doesnt send information to the last layer, remove it
+                        con_mat[:, node] = 0
+                        con_mat[node,:] = 0
+                for node in range(3):
+                    if connection_graph[0,node+1] ==0: # if any node doesnt get information from the input layer, remove it
+                        con_mat[:, node+1] = 0
+                        con_mat[node+1,:] = 0
+
+                if con_mat[0, 3] != 0: # ensure direct connection between input=>output for fast information propagation
+                    break
+                        
+            searchnet = SNASNet(args, con_mat)
             searchnet.to(torch.device("mps"))
-            
+                        
             searchnet.K = np.zeros((search_batchsize, search_batchsize))
             searchnet.num_actfun = 0
             
@@ -74,11 +93,11 @@ def find_best_neuroncell(trainset):
                 outputs = searchnet(inputs)
                 #print(searchnet.K/ (searchnet.num_actfun))
                 score = logdet(searchnet.K/ (searchnet.num_actfun))
-                print("" + str(hidn.item()) + ", " + str(score))
+                print("" + str(con_mat.flatten()) + ", weight num: " + str(sum([ p.numel() for p in searchnet.parameters() ])) + " score: " + str(score))
                 s.append(score)
 
             scores.append(np.mean(s))
-            history.append(hidn)
+            history.append(con_mat)
             gc.collect()
         
         print(scores)
@@ -91,24 +110,37 @@ def find_best_neuroncell(trainset):
         print (history)
         
     return best_policy
-        
+
+def connection_matrix_gen(num_node = 4, num_options = 5):
+
+    upper_cnts = torch.triu(torch.randint(num_options, size=(num_node, num_node)), diagonal=1)
+    cnts = upper_cnts
+
+    return cnts
+
+
 class DenseSpikingNN(nn.Module):
-    def __init__(self, hidden_neurons: int, timestep: int):
+    def __init__(self, hidden_neurons1: int, hidden_neurons2: int, timestep: int):
         super(DenseSpikingNN, self).__init__()
-        # Fully connected layer: Input 1600 -> hidden_neurons
-        self.fc1 = nn.Linear(1600, hidden_neurons)
+        # Fully connected layer: Input 1600 -> hidden_neurons1
+        self.fc1 = nn.Linear(1600, hidden_neurons1)
         # Spiking neuron layer after the first FC layer
         self.lif1 = neuron.LIFNode(v_threshold=1.0, v_reset=0.0, tau= 1.33)  
         
-        # Fully connected layer: hidden_neurons -> 11 (output)
-        self.fc2 = nn.Linear(hidden_neurons, 11)
+        # Fully connected layer: hidden_neurons1 -> hidden_neurons2
+        self.fc2 = nn.Linear(hidden_neurons1, hidden_neurons2)
         # Spiking neuron layer after the second FC layer
         self.lif2 = neuron.LIFNode(v_threshold=1.0, v_reset=0.0, tau= 1.33)  
-        
+
+        # Fully connected layer: hidden_neurons2 -> 11 (output)
+        self.fc3 = nn.Linear(hidden_neurons2, 11)
+        self.lif3 = neuron.LIFNode(v_threshold=1.0, v_reset=0.0, tau= 1.33)  
+
         self.timestep = timestep
         
         nn.init.uniform_(self.fc1.weight, a = 0, b = 1)
         nn.init.uniform_(self.fc2.weight, a = 0, b = 1)
+        nn.init.uniform_(self.fc3.weight, a = 0, b = 1)
         
     def forward(self, x):
         # Assume x is of shape [batchsize, T, 2, 40, 40]
@@ -126,6 +158,8 @@ class DenseSpikingNN(nn.Module):
             x_single = self.lif1(x_single)
             x_single = self.fc2(x_single)
             x_single = self.lif2(x_single)
+            x_single = self.fc3(x_single)
+            x_single = self.lif3(x_single)
         return x_single
 
 class ConvSpikingNN(nn.Module):

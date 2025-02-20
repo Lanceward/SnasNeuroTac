@@ -17,7 +17,9 @@ def threshold_array(arr, threshold, max_time):
     counts[counts >= threshold] = 1
     return np.repeat(uarr, counts)
 
-def load_and_prepare_data(file_path, threshold = 1, max_timestamp=1000):
+def load_and_prepare_data(file_path, threshold = 1, max_timestamp=1000, pool_size = 7):
+    assert 280 % pool_size == 0
+    
     with open(file_path, 'rb') as file:
         data = pickle.load(file)
     
@@ -26,16 +28,19 @@ def load_and_prepare_data(file_path, threshold = 1, max_timestamp=1000):
     data = data[:, 80:560]
     data = data[100:380, 100:380]
     
+    sensor_size = 280
+    
     h = data.shape[0]
     w = data.shape[1]
     # downsample to (40, 40)
     # reshape to (40, 40, 16)
-    data = data.reshape(40, 7, 40, 7)
+    pooled_sensor_size = sensor_size//pool_size
+    data = data.reshape(pooled_sensor_size, pool_size, pooled_sensor_size, pool_size)
     data = data.swapaxes(1, 2)
-    data = data.reshape(40, 40, 49)
+    data = data.reshape(pooled_sensor_size, pooled_sensor_size, pool_size**2)
     
     # Create an empty array with object dtype
-    pooled_data = np.empty((40, 40), dtype=object)
+    pooled_data = np.empty((pooled_sensor_size, pooled_sensor_size), dtype=object)
             
     for i in range(data.shape[0]):
         for j in range(data.shape[1]):
@@ -105,13 +110,14 @@ def integrate_events_by_fixed_interval(events, interval, H, W):
             return np.concatenate(frames)
 
 def play_single_texture_file(file_path):
-    data = load_and_prepare_data(file_path, threshold = 2, max_timestamp=1000)
+    data = load_and_prepare_data(file_path, threshold = 1, max_timestamp=1000, pool_size=1)
     events = eventize_data(data)
-    frames = integrate_events_by_fixed_interval(events, 1, 40, 40)
+    frames = integrate_events_by_fixed_interval(events, 1, 280, 280)
     print(frames.shape)
     print(frames.dtype)
     print(np.min(frames))
     print(np.max(frames))
+    print(np.sum(frames[:, 1, :, :]))
     play_frame(frames, save_gif_to="frames.gif")
 
 def ceiling_division(n, d):
@@ -129,9 +135,9 @@ class NeuroTacDataset(Dataset):
         
     def Load_data(self):
         # pooling
-        H = 40
-        W = 40
-        threshold = 2
+        H = 280
+        W = 280
+        threshold = 1
         files = os.listdir(self.data_dir)
         data_length = len(files)
         data = np.zeros((ceiling_division(self.max_timestamp, self.interval), data_length, 2, H, W), dtype=np.uint8)
@@ -146,7 +152,7 @@ class NeuroTacDataset(Dataset):
             
             #get data from datapath
             full_datapath = os.path.join(self.data_dir, datapath)
-            d = load_and_prepare_data(full_datapath, threshold, max_timestamp=self.max_timestamp)
+            d = load_and_prepare_data(full_datapath, threshold, max_timestamp=self.max_timestamp, pool_size=1)
             e = eventize_data(d)
             f = integrate_events_by_fixed_interval(e, self.interval, H, W)
             #play_frame(f, save_gif_to="/Users/lanceshi/Desktop/DISS/code/SnasnetNeuroTac/DataSetGifs/" + datapath + ".gif")
@@ -164,12 +170,64 @@ class NeuroTacDataset(Dataset):
     def __getitem__(self, idx):
         return self.data[:, idx, :, :, :], self.labels[idx]  # Return tuple (input, target)
 
+def CreateNeuroTacDataset(dataset_directory, dataset_target_directory, unique_labels, pool_size = 7, threshold = 2, interval = 1, max_timestamp = 1000):
+    """Create neurotac dataset, thens store the data and label in two seperate
+        in a specific location
+
+    Args:
+        dataset_directory (str): _description_
+        dataset_target_directory (str): _description_
+        pool_size (int): pool block: (pool_size, pool_size)
+        threshold (int): number of spikes in the pool block in a timestep to
+                          register as a spike
+        interval (int): number of ms as a timestep
+        max_timestamp (int): data cut from timestamp [0:max_timestamp]
+    """
+    assert 280 % pool_size == 0 and len(unique_labels) < 256
+    
+    if not os.path.exists(dataset_target_directory):
+        os.makedirs(dataset_target_directory)
+    
+    output_data_filename = os.path.join(dataset_target_directory, "neurotac_data.dat")
+    output_labels_filename = os.path.join(dataset_target_directory, "neurotac_labels.dat")
+    
+    files = os.listdir(dataset_directory)
+    data_size = len(files)
+    pooled_side_length = 280 // pool_size
+    
+    #(data_size, num_of_timesteps, 1, pooled_side_length, pooled_side_length)
+    neuro_data = np.memmap(output_data_filename, dtype=np.uint8, mode='w+', shape=(data_size, 1000//interval, 1, pooled_side_length, pooled_side_length))
+    neuro_labels = np.memmap(output_labels_filename, dtype=np.uint8, mode='w+', shape=(data_size))
+
+    idx = 0
+    for datapath in files:
+        print("index " + str(idx) + ": " + datapath)
+        #find label of datapath
+        for i in range(len(unique_labels)):
+            if unique_labels[i] in datapath:
+                neuro_labels[idx] = i
+        
+        #get data from datapath
+        full_datapath = os.path.join(dataset_directory, datapath)
+        d = load_and_prepare_data(full_datapath, threshold, max_timestamp=max_timestamp, pool_size=pool_size)
+        e = eventize_data(d)
+        f = integrate_events_by_fixed_interval(e, interval, pooled_side_length, pooled_side_length)
+        #print("0th dim sum: " + str(np.sum(f[:, 0, :, :])) + " 1st dim sum: " + str(np.sum(f[:, 1, :, :])))
+        neuro_data[idx, 0:f.shape[0], 0, :, :] = f[:, 1, :, :]
+        #flush the edits
+        neuro_data.flush()
+        neuro_labels.flush()
+        #add 1 to idx
+        idx += 1
+    del neuro_data
+    del neuro_labels
+
 if __name__ == "__main__":
     
     dir_path = "/Users/lance-shi/school/Bristol/SNN/SlideS10"
+    target_path = "/Users/lance-shi/school/NeuroTacDataSetFullRes"
     labels = ['acrylic', 'canvas', 'cotton', 'fashionfabric', 'felt', 'fur', 'mesh', 'nylon', 'wood', 'wool']
-    nt_dataset = NeuroTacDataset(dir_path, labels, interval=1)
-    torch.save(nt_dataset, "NeuroTacDataSetUInt8_cropped.pth")
+    CreateNeuroTacDataset(dir_path, target_path, labels, pool_size=1, threshold=1, interval=1, max_timestamp=1000)
     '''
-    play_single_texture_file("/Users/lance-shi/school/Bristol/SNN/SlideS10/taps_trial_0_acrylic_events_on")
+    play_single_texture_file("/Users/lance-shi/school/Bristol/SNN/SlideS10/taps_trial_95_canvas_events_on")
     '''
